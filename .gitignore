@@ -1,0 +1,15 @@
+.env
+.venv/
+runtime/
+__pycache__/
+.pytest_cache/
+*.pyc
+firmware/.pio/
+firmware/include/secrets.h
+firmware/include/archived_pages.h
+
+.DS_Store
+.env.*
+!.env.example
+*.log
+*.bin

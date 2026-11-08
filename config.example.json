@@ -1,0 +1,32 @@
+{
+  "timezone": "Asia/Shanghai",
+  "weather": {
+    "name": "北京海淀",
+    "latitude": 39.99064,
+    "longitude": 116.28868
+  },
+  "device": {
+    "id": null,
+    "name": "InkDesk",
+    "enabled": false,
+    "refresh_interval_seconds": 300,
+    "transport": "local"
+  },
+  "port": 8766,
+  "intervals": {
+    "quotes": 300,
+    "weather": 900,
+    "usage": 300,
+    "screen": 60
+  },
+  "codex": {
+    "socket": null,
+    "event_stale_seconds": 1800,
+    "scope": "project"
+  },
+  "firmware_bridge": {
+    "enabled": false,
+    "host": "0.0.0.0",
+    "port": 8767
+  }
+}
