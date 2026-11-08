@@ -1,6 +1,6 @@
 # InkDesk「墨台」当前状态与交接
 
-最后更新：2026-11-08 22:36（Asia/Shanghai）。项目根目录：`/Users/mi/Desktop/Paper`。
+最后更新：2026-11-08 22:41（Asia/Shanghai）。项目根目录：`/Users/mi/Desktop/Paper`。
 
 ## 当前设备与架构
 
@@ -83,4 +83,4 @@ SenseCraft设备ID `20240911`，原活动列表 `20245133`；归档第二/三屏
 
 ## InkDesk 项目与 Git
 
-用户将项目命名为 **InkDesk「墨台」**，标语“把关心的事，放在眼前。”，定位为可自定义的桌面墨水屏看板。GitHub仓库使用 `alanwan0830-tech/InkDesk`，私有。现有目录、Python包和登录服务名保持兼容；代码、测试、文档及素材纳入Git，凭证、运行日志、依赖目录、备份与固件二进制不提交。
+用户将项目命名为 **InkDesk「墨台」**，标语“把关心的事，放在眼前。”，定位为可自定义的桌面墨水屏看板。GitHub仓库使用 `alanwan0830-tech/InkDesk`，已按用户要求设为公开，并核对GitHub可见性为PUBLIC。现有目录、Python包和登录服务名保持兼容；代码、测试、文档及素材纳入Git，凭证、运行日志、依赖目录、备份与固件二进制不提交。
