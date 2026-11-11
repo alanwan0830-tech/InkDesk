@@ -105,6 +105,7 @@ void fetchTask(void*) {
             uint32_t start=millis();
             while (WiFi.status()!=WL_CONNECTED && millis()-start<15000) vTaskDelay(pdMS_TO_TICKS(100));
             if (WiFi.status()==WL_CONNECTED) {
+                Serial.println("Wi-Fi connected");
                 if(strlen(PAPER_BRIDGE_MDNS) && MDNS.begin("paper-e1001")) {
                     IPAddress address=MDNS.queryHost(PAPER_BRIDGE_MDNS,1500);
                     if(address!=IPAddress(0,0,0,0))frameURL="http://"+address.toString()+":8767/frame";
@@ -118,7 +119,7 @@ void fetchTask(void*) {
                     }
                     if (!delivered) free(packet);
                 }
-            }
+            } else Serial.println("Wi-Fi connection timed out");
             WiFi.disconnect(false,false); // Never erase saved Wi-Fi settings.
             WiFi.mode(WIFI_OFF);
         }

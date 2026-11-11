@@ -19,6 +19,7 @@ from paper.common import atomic_json
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--execute',action='store_true')
+    parser.add_argument('--baud',type=int,choices=(57600,115200),default=115200)
     args=parser.parse_args()
     if not args.execute:raise SystemExit('Requires an explicitly authorized --execute operation')
     os.umask(0o077)
@@ -45,7 +46,7 @@ def main():
     result={'created_at':stamp,'app_offset':'0x90000','sha256':manifest['sha256'],'write_verified':False,'protected_regions_verified':False}
     esp=None;write_started=False
     try:
-        esp=esptool.detect_chip(port,baud=115200)
+        esp=esptool.detect_chip(port,baud=args.baud)
         if esp.CHIP_NAME!='ESP32-S3' or esp.get_secure_boot_enabled() or esp.get_flash_encryption_enabled():
             raise RuntimeError('Unexpected chip or security state')
         esp=esp.run_stub()

@@ -4,7 +4,7 @@
 
 一个可自定义的桌面墨水屏看板。把行情、天气、时间与工作状态放到桌面上，抬眼即见。
 
-当前版本：**0.3**。基于 reTerminal E1001（ESP32-S3，800×480 黑白墨水屏），包含 Mac 数据服务和设备端自研固件；已通过 48 项自动测试及用户实机验收。
+当前版本：**0.3**。基于 reTerminal E1001（ESP32-S3，800×480 黑白墨水屏），包含 Mac 数据服务和设备端自研固件。当前代码已通过 52 项自动测试，0.3 已有用户实机验收记录。
 
 ## 现在可以做什么
 
@@ -67,6 +67,7 @@ uv tool run --python 3.12 --with pip --from platformio==6.1.18 pio run -d firmwa
 0.3 已通过用户实机测试；自动回归、异常数据、离线重启及恢复证据见 [测试报告](FIRMWARE-TESTS.md)。电池续航、真实断电、六小时以上残影和完整原厂写回尚未验证，当前未实现深度休眠优化。
 
 - [当前状态与交接](PROJECT.md)
+- [Mac mini 迁移与验收](MAC-MINI-MIGRATION.md)
 - [代码审查记录](firmware/REVIEW.md)
 - [备份与固件记录](FIRMWARE.md)
 - [历史功能记录](FUNCTIONAL-STATUS.md)

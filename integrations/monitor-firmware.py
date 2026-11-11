@@ -35,7 +35,7 @@ try:
         os.write(out,data);buffer+=data
         while b'\n' in buffer:
             line,buffer=buffer.split(b'\n',1);line=line.decode('utf-8','replace').strip()
-            if allowed.search(line):
+            if allowed.search(line) or line in ('Wi-Fi connected', 'Wi-Fi connection timed out'):
                 text=datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%H:%M:%S')+' '+line+'\n'
                 os.write(clean,text.encode());print(text,end='',flush=True)
 finally:

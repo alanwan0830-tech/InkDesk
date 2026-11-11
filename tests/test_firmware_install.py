@@ -7,7 +7,8 @@ import types
 import pytest
 
 @pytest.mark.parametrize('failure', [None,'metadata','write','protected'])
-def test_app_only_installer_verification_and_failure_paths(tmp_path,monkeypatch,failure):
+@pytest.mark.parametrize('baud', [57600,115200])
+def test_app_only_installer_verification_and_failure_paths(tmp_path,monkeypatch,failure,baud):
     stub=types.SimpleNamespace()
     monkeypatch.setitem(sys.modules,'esptool',stub)
     spec=importlib.util.spec_from_file_location('installer',Path(__file__).parents[1]/'integrations/flash-reviewed-firmware.py')
@@ -15,7 +16,7 @@ def test_app_only_installer_verification_and_failure_paths(tmp_path,monkeypatch,
     monkeypatch.setattr(m,'ROOT',tmp_path)
     monkeypatch.setattr(m.os,'umask',lambda _:None)
     monkeypatch.setattr(m.subprocess,'run',lambda *a,**k:types.SimpleNamespace(returncode=1))
-    monkeypatch.setattr(sys,'argv',['installer','--execute'])
+    monkeypatch.setattr(sys,'argv',['installer','--execute','--baud',str(baud)])
     stock=b'\xff'*33554432
     base=tmp_path/'runtime/firmware-backups/20261108-183714';base.mkdir(parents=True)
     (base/'stock-full.bin').write_bytes(stock)
@@ -40,7 +41,10 @@ def test_app_only_installer_verification_and_failure_paths(tmp_path,monkeypatch,
             return 'original'
         def hard_reset(self):self.reset=True
     device=Device();device._port=types.SimpleNamespace(close=lambda:setattr(device,'closed',True))
-    stub.detect_chip=lambda *a,**k:device
+    def detect_chip(port,**kwargs):
+        assert kwargs['baud']==baud
+        return device
+    stub.detect_chip=detect_chip
     def write_flash(esp,items,compress):
         assert items==[(0x90000,binary)] and compress
         device.written=True
