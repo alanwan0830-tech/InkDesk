@@ -1,0 +1,13 @@
+[project]
+name = "inkdesk"
+version = "0.3.0"
+description = "InkDesk 墨台：把关心的事，放在眼前。一个可自定义的桌面墨水屏看板。"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["cairosvg>=2.8,<3", "pillow>=11,<13", "requests[socks]>=2.32,<3"]
+
+[dependency-groups]
+dev = ["pytest>=8,<10"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
