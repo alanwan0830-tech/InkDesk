@@ -356,7 +356,8 @@ void loop() {
         // Validate again before touching the live frame or RTC.
         if(message.vehicle){
             bool valid=packet && validPacket(packet,PACKET_SIZE,"VEH1");
-            bool active=navigation.selected==1 && vehicleVisit==message.visit;
+            bool latest=vehicleVisit==message.visit;
+            bool active=navigation.selected==1 && latest;
             if(valid){
                 bool different=!haveVehicle || memcmp(vehicleImage,packet+HEADER_SIZE,IMAGE_SIZE)!=0;
                 static uint32_t savedAt=0;
@@ -366,11 +367,10 @@ void loop() {
                 memcpy(vehicleImage,packet+HEADER_SIZE,IMAGE_SIZE);
                 haveVehicle=true;
                 vehicleChanged=active && (vehicleFailed || memcmp(shown,vehicleImage,IMAGE_SIZE)!=0);
-                if(active)vehicleFailed=false;
             } else if(active){
                 vehicleChanged=!vehicleFailed;
-                vehicleFailed=true;
             }
+            if(latest)vehicleFailed=!valid;
             if(active)Serial.println(valid ? "Vehicle visit updated" : "Vehicle visit offline");
         } else if (packet && validPacket(packet,PACKET_SIZE)) {
             memcpy(baseImage,packet+HEADER_SIZE,IMAGE_SIZE);
