@@ -8,10 +8,12 @@ import math
 import re
 import threading
 import time
+from concurrent.futures import Future
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 import requests
 from PIL import Image, ImageDraw, ImageFont
@@ -19,6 +21,7 @@ from PIL import Image, ImageDraw, ImageFont
 from .common import ROOT, RUNTIME, atomic_json, read_json
 
 LOG = logging.getLogger(__name__)
+SNAPSHOT_BUDGET = 14.0  # Leave room for rendering and delivery within the device's 20s header timeout.
 ART = ROOT / 'assets/vehicle-alpine.png'
 PARKING_QUERY = ('只读查询最近保存的停车记录，只返回 JSON 对象，字段 place 为场所名称，'
                  'area 为楼层和区域，time 为记录的 HH:mm。缺失用 null，禁止估算、'
@@ -51,11 +54,23 @@ def short(v, limit=100):
     return ' '.join(v.split())[:limit] if isinstance(v, str) else ''
 
 
+def observed_epoch(value, now):
+    stamp = datetime.fromisoformat(value)
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=ZoneInfo('Asia/Shanghai'))
+    epoch = int(stamp.timestamp())
+    if not 0 < epoch <= now + 5:
+        raise ValueError('Invalid vehicle observation time')
+    return epoch
+
+
 class VehicleFeed:
     def __init__(self, config=None, cache=RUNTIME/'cache'):
         self.config = config or RUNTIME/'vehicle-config.json'
         self.cache = cache
         self.lock = threading.Lock()
+        self.pending = {}
+        self.model_lock = threading.Lock()
         self.parking_lock = threading.Lock()
 
     def parking_worker(self, cfg, path, attempt):
@@ -75,52 +90,99 @@ class VehicleFeed:
         finally:
             self.parking_lock.release()
 
+    def model_worker(self, cfg, car, path):
+        try:
+            vehicles = request_data(cfg, '/vehicles')
+            model = next((short(v.get('carModel')) for v in vehicles if v.get('id') == car), '')
+            if model:
+                atomic_json(path, model)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, requests.RequestException):
+            pass
+        finally:
+            self.model_lock.release()
+
     def snapshot(self):
+        deadline = time.monotonic() + SNAPSHOT_BUDGET
+        cfg = read_json(self.config, {})
+        if not isinstance(cfg, dict):
+            raise ValueError('Invalid vehicle configuration')
+        identity = hashlib.sha256(json.dumps([cfg.get(k) for k in ('base_url','vehicle_id','api_key')]).encode()).hexdigest()[:24]
+        state_path = self.cache / ('vehicle-'+identity+'.json')
+        parking_path = self.cache / ('parking-'+identity+'.json')
         with self.lock:
-            cfg = read_json(self.config, {})
-            identity = hashlib.sha256(json.dumps([cfg.get(k) for k in ('base_url','vehicle_id','api_key')]).encode()).hexdigest()[:24]
-            state_path = self.cache / ('vehicle-'+identity+'.json')
-            parking_path = self.cache / ('parking-'+identity+'.json')
-            state = read_json(state_path, {})
-            parking = read_json(parking_path, {})
-            stage = 'config'
-            try:
-                car = int(cfg['vehicle_id'])
-                stage = 'status'
-                route = f'/vehicles/status/{car}'
+            future = self.pending.get(identity)
+            if future is None:
+                future = Future()
+                self.pending[identity] = future
                 try:
-                    data = request_data(cfg, route)
-                except (requests.Timeout, requests.ConnectionError, requests.HTTPError) as exc:
-                    LOG.warning('Vehicle status retry: %s', type(exc).__name__)
-                    data = request_data(cfg, route)
-                stage = 'fields'
-                if data.get('vehicleId') != car or not number(data.get('remainingRange')) or not number(data.get('batteryLevel')) or data['batteryLevel'] > 100:
-                    raise ValueError('Invalid vehicle snapshot')
-                stamp = datetime.strptime(data['observedAt'], '%Y-%m-%d %H:%M:%S')
-                model = state.get('model', '')
-                if not model:
-                    try:
-                        vehicles = request_data(cfg, '/vehicles')
-                        model = next((short(v.get('carModel')) for v in vehicles if v.get('id') == car), '')
-                    except (ValueError, TypeError, KeyError, AttributeError, requests.RequestException):
-                        model = ''
-                state = {k: data.get(k) for k in ('vehicleName','remainingRange','batteryLevel','totalMileage','charging','sentryModeEnabled','parkingSpotNumber')}
-                state.update(model=model, observed=stamp.isoformat(' '))
-                stage = 'cache'
-                atomic_json(state_path, state)
-                now = time.time()
-                if now-parking.get('attempt', 0) >= 900 and self.parking_lock.acquire(False):
-                    try:
-                        atomic_json(parking_path, {**parking, 'attempt': now})
-                        threading.Thread(target=self.parking_worker, args=(cfg,parking_path,now), daemon=True).start()
-                    except Exception:
-                        self.parking_lock.release()
-                        raise
-                ok = True
-            except (OSError, ValueError, TypeError, AttributeError, KeyError, requests.RequestException) as exc:
-                LOG.warning('Vehicle snapshot failed: stage=%s error=%s', stage, type(exc).__name__)
-                ok = False
-            return state, parking.get('record', {}), ok
+                    threading.Thread(target=self.refresh_worker,
+                                     args=(future,identity,cfg,state_path,parking_path,deadline),
+                                     daemon=True).start()
+                except RuntimeError:
+                    del self.pending[identity]
+                    raise
+        try:
+            return future.result(timeout=max(0, deadline-time.monotonic()))
+        except TimeoutError:
+            LOG.warning('Vehicle snapshot exceeded response budget')
+            return read_json(state_path, {}), read_json(parking_path, {}).get('record', {}), False
+
+    def refresh_worker(self, future, identity, cfg, state_path, parking_path, deadline):
+        try:
+            result = self.refresh(cfg, state_path, parking_path, deadline)
+        except Exception as exc:
+            with self.lock:
+                del self.pending[identity]
+                future.set_exception(exc)
+        else:
+            with self.lock:
+                del self.pending[identity]
+                future.set_result(result)
+
+    def refresh(self, cfg, state_path, parking_path, deadline):
+        state = read_json(state_path, {})
+        parking = read_json(parking_path, {})
+        stage = 'config'
+        try:
+            car = int(cfg['vehicle_id'])
+            stage = 'status'
+            route = f'/vehicles/status/{car}'
+            try:
+                data = request_data(cfg, route)
+            except (requests.Timeout, requests.ConnectionError, requests.HTTPError) as exc:
+                if time.monotonic() >= deadline:
+                    raise
+                LOG.warning('Vehicle status retry: %s', type(exc).__name__)
+                data = request_data(cfg, route)
+            stage = 'fields'
+            if data.get('vehicleId') != car or not number(data.get('remainingRange')) or not number(data.get('batteryLevel')) or data['batteryLevel'] > 100:
+                raise ValueError('Invalid vehicle snapshot')
+            stamp = datetime.strptime(data['observedAt'], '%Y-%m-%d %H:%M:%S')
+            observed_epoch(stamp.isoformat(' '), datetime.now().timestamp())
+            model_path = state_path.with_suffix('.model.json')
+            model = state.get('model') or read_json(model_path, '')
+            state = {k: data.get(k) for k in ('vehicleName','remainingRange','batteryLevel','totalMileage','charging','sentryModeEnabled','parkingSpotNumber')}
+            state.update(model=model, observed=stamp.isoformat(' '))
+            stage = 'cache'
+            atomic_json(state_path, state)
+            if not model and self.model_lock.acquire(False):
+                try:
+                    threading.Thread(target=self.model_worker, args=(cfg,car,model_path), daemon=True).start()
+                except RuntimeError:
+                    self.model_lock.release()
+            now = time.time()
+            if now-parking.get('attempt', 0) >= 900 and self.parking_lock.acquire(False):
+                try:
+                    atomic_json(parking_path, {**parking, 'attempt': now})
+                    threading.Thread(target=self.parking_worker, args=(cfg,parking_path,now), daemon=True).start()
+                except Exception:
+                    self.parking_lock.release()
+                    raise
+            ok = True
+        except (OSError, ValueError, TypeError, AttributeError, KeyError, requests.RequestException) as exc:
+            LOG.warning('Vehicle snapshot failed: stage=%s error=%s', stage, type(exc).__name__)
+            ok = False
+        return state, parking.get('record', {}), ok
 
 
 @lru_cache(maxsize=24)

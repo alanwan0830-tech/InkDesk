@@ -50,7 +50,7 @@ def frame_packet(snapshot: dict, now: int, source_at: int) -> bytes:
 
 
 def make_handler(token: str, snapshot_path: Path):
-    from .vehicle import VehicleFeed, vehicle_image
+    from .vehicle import VehicleFeed, observed_epoch, vehicle_image
     feed = VehicleFeed()
     class Handler(BaseHTTPRequestHandler):
         def setup(self):
@@ -77,7 +77,8 @@ def make_handler(token: str, snapshot_path: Path):
                         raise ValueError("No usable vehicle snapshot")
                     pixels = vehicle_image(state, parking, ok).tobytes()
                     now = int(time.time())
-                    prefix = struct.pack('<4sHHIII', b'VEH1', WIDTH, HEIGHT, now, now, int(not ok))
+                    source_at = observed_epoch(state['observed'], now)
+                    prefix = struct.pack('<4sHHIII', b'VEH1', WIDTH, HEIGHT, now, source_at, int(not ok))
                     body = prefix + struct.pack('<I', zlib.crc32(pixels, zlib.crc32(prefix))) + pixels
                 else:
                     # Read data and mtime from the same open file across atomic replacement.
