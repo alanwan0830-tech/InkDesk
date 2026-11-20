@@ -2,7 +2,7 @@
 #include <stdint.h>
 
 namespace paper {
-constexpr unsigned PAGE_COUNT=4;
+constexpr unsigned PAGE_COUNT=5;
 constexpr int PREVIOUS_BUTTON=5, NEXT_BUTTON=4, HOME_BUTTON=3;
 
 // One event per stable press, including across millis() wrap. Boot-held keys

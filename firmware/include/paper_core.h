@@ -38,8 +38,8 @@ inline uint32_t crcUpdate(uint32_t crc, const uint8_t* data, size_t size) {
     }
     return crc;
 }
-inline bool validPacket(const uint8_t* p, size_t n) {
-    if (n != PACKET_SIZE || memcmp(p,"PPR2",4) || p[4]!=0x20 || p[5]!=3 || p[6]!=0xe0 || p[7]!=1) return false;
+inline bool validPacket(const uint8_t* p, size_t n, const char* magic="PPR2") {
+    if (n != PACKET_SIZE || memcmp(p,magic,4) || p[4]!=0x20 || p[5]!=3 || p[6]!=0xe0 || p[7]!=1) return false;
     const uint32_t now=u32(p+8), source=u32(p+12);
     if (now<1704067200U || now>=2145916800U || !source || source>now+5 || u32(p+16)>1) return false;
     uint32_t crc=crcUpdate(0xffffffffU,p,20);

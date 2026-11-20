@@ -24,7 +24,7 @@ settings[6][termios.VMIN]=0;settings[6][termios.VTIME]=0
 termios.tcsetattr(fd,termios.TCSANOW,settings)
 out=os.open(raw,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
 clean=os.open(summary,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
-allowed=re.compile(r'Manual page|Button |Paper firmware|Full refresh|Partial complete|Frame committed|Panel BUSY|Display failed|First-screen|Keeping cached|Memory unavailable|PSRAM unavailable|rst:|boot:|Guru Meditation|Brownout|assert failed')
+allowed=re.compile(r'Frame RX |Vehicle |Manual page|Button |Paper firmware|Full refresh|Partial complete|Frame committed|Panel BUSY|Display failed|First-screen|Keeping cached|Memory unavailable|PSRAM unavailable|rst:|boot:|Guru Meditation|Brownout|assert failed')
 end=time.monotonic()+args.seconds;buffer=b''
 print(f'Passive monitor: {summary}',flush=True)
 try:

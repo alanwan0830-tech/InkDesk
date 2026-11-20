@@ -16,7 +16,9 @@ int main() {
     }
     nav.press(1);assert(nav.selected==2);nav.commit();
     nav.press(1);assert(nav.selected==3);nav.commit();
+    nav.press(1);assert(nav.selected==4);nav.commit();
     nav.press(1);assert(nav.selected==0);nav.commit();
+    nav.press(-1);assert(nav.selected==4);nav.commit();
     nav.press(-1);assert(nav.selected==3);nav.commit();
     nav.press(-1);assert(nav.selected==2);
     // A failed switch is not committed; retry keeps the requested destination.

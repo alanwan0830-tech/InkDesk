@@ -8,6 +8,7 @@
 #include <TFT_eSPI.h>
 #include <esp_timer.h>
 #include <esp_wifi.h>
+#include <esp32s3/rom/miniz.h>
 #include <time.h>
 #include "settings.h"
 #include "paper_core.h"
@@ -22,14 +23,17 @@ PaperPanel panel;
 RtcPCF8563<TwoWire> rtc(Wire);
 Preferences prefs;
 String wifiSSID, wifiPassword, frameURL, frameToken;
-QueueHandle_t inbox, buttons;
+QueueHandle_t inbox, buttons, vehicleRequests;
+uint8_t* vehicleImage=nullptr;
+bool haveVehicle=false, vehicleFailed=false;
+uint32_t vehicleVisit=0;
 Navigation navigation;
 uint8_t *baseImage=nullptr, *shown=nullptr;
 uint32_t sourceAt=0, lastFull=0, lastSaved=0, sourceFlags=0, lastDisplayTry=0;
 LocalClock localClock;
 bool haveImage=false, initialized=false, rtcReady=false, prefsReady=false;
 bool panelSynced=false, displayFailed=false;
-struct FrameMessage { uint8_t* packet; int64_t receivedAt; };
+struct FrameMessage { uint8_t* packet; int64_t receivedAt; uint32_t visit; };
 // Sample independently so short presses during an e-paper refresh are retained.
 void buttonTask(void*) {
     const int pins[]={PREVIOUS_BUTTON,NEXT_BUTTON,HOME_BUTTON};
@@ -66,34 +70,71 @@ void setClock(uint32_t epoch) {
     if (!rtc.LastError() && prefsReady && !prefs.getBool("rtcUTC",false)) prefs.putBool("rtcUTC",true);
 }
 
-bool download(uint8_t* packet) {
+bool download(uint8_t* packet, bool vehicle) {
     HTTPClient http;
     http.setConnectTimeout(5000);
-    http.setTimeout(5000);
-    if (!http.begin(frameURL)) return false;
+    http.setTimeout(vehicle ? 20000 : 5000);
+    String url=frameURL;
+    if(vehicle){if(!url.endsWith("/frame"))return false;url.remove(url.length()-5);url+="vehicle";}
+    if (!http.begin(url)) return false;
     http.addHeader("Authorization", String("Bearer ")+frameToken);
+    const char* headers[]={"Content-Encoding"};
+    http.useHTTP10(true);
+    http.addHeader("Accept-Encoding","deflate");
+    http.collectHeaders(headers,1);
+    const char* route=vehicle ? "vehicle" : "home";
+    uint32_t requested=millis();
+    int status=http.GET(), length=http.getSize();
+    String encoding=http.header("Content-Encoding");
+    bool compressed=encoding=="deflate";
+    bool supported=compressed ? length>0 && length<int(PACKET_SIZE) :
+                                encoding.isEmpty() && length==int(PACKET_SIZE);
+    Serial.printf("Frame RX %s http=%d length=%d compressed=%d header_ms=%lu rssi=%d\n",
+                  route,status,length,compressed,millis()-requested,int(WiFi.RSSI()));
     bool ok=false;
-    if (http.GET()==200 && http.getSize()==int(PACKET_SIZE)) {
+    if (status==200 && supported) {
+        uint8_t* body=compressed ? static_cast<uint8_t*>(ps_malloc(length)) : packet;
         WiFiClient* stream=http.getStreamPtr();
-        size_t read=0;
+        size_t received=0;
         uint32_t started=millis();
-        while (read<PACKET_SIZE && millis()-started<20000) {
+        while (body && stream && received<size_t(length) && millis()-started<20000) {
             int available=stream->available();
             if (available>0) {
-                size_t amount=min(size_t(available), PACKET_SIZE-read);
-                int got=stream->read(packet+read, amount);
+                size_t amount=min(size_t(available),size_t(length)-received);
+                int got=stream->read(body+received,amount);
                 if (got<=0) break;
-                read+=size_t(got);
+                received+=size_t(got);
             } else if (!http.connected()) break;
             else vTaskDelay(pdMS_TO_TICKS(10));
         }
-        ok=validPacket(packet,read);
+        const char* result=body ? (millis()-started>=20000 ? "timeout" : "closed") : "allocation";
+        if (received==size_t(length)) {
+            size_t decoded=received;
+            if (compressed) {
+                auto* inflater=static_cast<tinfl_decompressor*>(ps_malloc(sizeof(tinfl_decompressor)));
+                decoded=0;
+                if (inflater) {
+                    tinfl_init(inflater);
+                    size_t input=received, output=PACKET_SIZE;
+                    int flags=TINFL_FLAG_PARSE_ZLIB_HEADER | TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF;
+                    if (tinfl_decompress(inflater,body,&input,packet,packet,&output,flags)==TINFL_STATUS_DONE &&
+                        input==received) decoded=output;
+                    free(inflater);
+                }
+            }
+            ok=validPacket(packet,decoded,vehicle ? "VEH1" : "PPR2");
+            result=ok ? "valid" : decoded==PACKET_SIZE ? "invalid-packet" : "decode";
+        }
+        Serial.printf("Frame RX %s result=%s received=%u body_ms=%lu offline=%d\n",
+                      route,result,unsigned(received),millis()-started,ok ? int(u32(packet+16)) : -1);
+        if (compressed) free(body);
     }
     http.end();
     return ok;
 }
 
 void fetchTask(void*) {
+    uint32_t homeDue=millis(), visit=0;
     for (;;) {
         bool delivered=false;
         if (frameURL.length() && frameToken.length()>=32) {
@@ -113,9 +154,9 @@ void fetchTask(void*) {
                 }
                 uint8_t* packet=(uint8_t*)ps_malloc(PACKET_SIZE);
                 if (packet) {
-                    if (download(packet)) {
-                        FrameMessage message{packet,esp_timer_get_time()};
-                        delivered=xQueueSend(inbox,&message,0)==pdTRUE;
+                    if (download(packet,visit!=0)) {
+                        FrameMessage message{packet,esp_timer_get_time(),visit};
+                        delivered=xQueueSend(inbox,&message,portMAX_DELAY)==pdTRUE;
                     }
                     if (!delivered) free(packet);
                 }
@@ -123,8 +164,19 @@ void fetchTask(void*) {
             WiFi.disconnect(false,false); // Never erase saved Wi-Fi settings.
             WiFi.mode(WIFI_OFF);
         }
-        Serial.println(delivered ? "First-screen data accepted" : "Keeping cached frame; local clock continues");
-        vTaskDelay(pdMS_TO_TICKS(delivered ? DATA_INTERVAL_MS : 60000));
+        if(visit){
+            if(!delivered){
+                FrameMessage failure{nullptr,0,visit};
+                xQueueSend(inbox,&failure,portMAX_DELAY);
+            }
+            Serial.println(delivered ? "Vehicle frame received" : "Vehicle request failed");
+        } else {
+            Serial.println(delivered ? "First-screen data accepted" : "Keeping cached frame; local clock continues");
+            homeDue=millis()+(delivered ? DATA_INTERVAL_MS : 60000);
+        }
+        visit=0;
+        int32_t remaining=int32_t(homeDue-millis());
+        if(remaining>0)xQueueReceive(vehicleRequests,&visit,pdMS_TO_TICKS(remaining));
     }
 }
 
@@ -171,7 +223,19 @@ void render(uint32_t now) {
     if(displayFailed && millis()-lastDisplayTry<60000)return;
     lastDisplayTry=millis();
     uint8_t* pixels=(uint8_t*)screen.getPointer();
-    if (navigation.selected>0) memcpy(pixels,ARCHIVED_PAGES[navigation.selected-1],IMAGE_SIZE);
+    if(navigation.selected==1){
+        if(haveVehicle)memcpy(pixels,vehicleImage,IMAGE_SIZE);
+        else {
+            screen.fillScreen(TFT_WHITE);
+            screen.setTextColor(TFT_BLACK,TFT_WHITE);
+            screen.drawString(vehicleFailed ? "Vehicle data unavailable" : "Loading vehicle data...",36,180,4);
+        }
+        if(haveVehicle && vehicleFailed){
+            screen.setTextColor(TFT_BLACK,TFT_WHITE);
+            screen.drawString("OFFLINE / cached",360,24,2);
+        }
+    }
+    else if (navigation.selected>=2) memcpy(pixels,ARCHIVED_PAGES[navigation.selected-2],IMAGE_SIZE);
     else if (haveImage) memcpy(pixels,baseImage,IMAGE_SIZE);
     else {
         screen.fillScreen(TFT_WHITE);
@@ -201,13 +265,15 @@ void render(uint32_t now) {
 
 void setup() {
     Serial.begin(115200);
-    Serial.println("Paper firmware 0.3 / local clock / manual pages / no autoplay");
+    Serial.println("Paper firmware 0.4 / local clock / manual pages / no autoplay");
     if (!psramFound()) { Serial.println("PSRAM unavailable; display unchanged"); return; }
     baseImage=(uint8_t*)ps_malloc(IMAGE_SIZE);
     shown=(uint8_t*)ps_malloc(IMAGE_SIZE);
-    inbox=xQueueCreate(1,sizeof(FrameMessage));
+    vehicleImage=(uint8_t*)ps_malloc(IMAGE_SIZE);
+    vehicleRequests=xQueueCreate(1,sizeof(uint32_t));
+    inbox=xQueueCreate(3,sizeof(FrameMessage));
     buttons=xQueueCreate(8,sizeof(int));
-    if (!baseImage || !shown || !inbox || !buttons || !screen.getPointer()) {
+    if (!vehicleImage || !vehicleRequests || !baseImage || !shown || !inbox || !buttons || !screen.getPointer()) {
         Serial.println("Memory unavailable; display unchanged");return;
     }
     prefsReady=prefs.begin("paper-v1",false);
@@ -237,6 +303,14 @@ void setup() {
             free(stored);
         }
     }
+    if(prefsReady && prefs.getBytesLength("vehicle")==PACKET_SIZE){
+        auto cached=(uint8_t*)ps_malloc(PACKET_SIZE);
+        if(cached && prefs.getBytes("vehicle",cached,PACKET_SIZE)==PACKET_SIZE && validPacket(cached,PACKET_SIZE,"VEH1")){
+            memcpy(vehicleImage,cached+HEADER_SIZE,IMAGE_SIZE);
+            haveVehicle=true;
+        }
+        free(cached);
+    }
     // Use the vendor sprite/font engine only; all hardware access is bounded.
     screen.setBitmapColor(1,0);screen.setTextFont(1);
     screen.setRotation(0);
@@ -251,17 +325,39 @@ void setup() {
 
 void loop() {
     if (!initialized) { delay(1000);return; }
-    bool changed=false;
+    bool changed=false, vehicleChanged=false;
     int direction;
     if(xQueueReceive(buttons,&direction,0)==pdTRUE) {
         navigation.press(direction);
+        if(navigation.selected==1){
+            if(++vehicleVisit==0)++vehicleVisit;
+            xQueueOverwrite(vehicleRequests,&vehicleVisit);
+        }
         Serial.printf("Manual page selected: %u\n",navigation.selected+1);
     }
     FrameMessage message{};
     if (xQueueReceive(inbox,&message,0)==pdTRUE) {
         uint8_t* packet=message.packet;
         // Validate again before touching the live frame or RTC.
-        if (validPacket(packet,PACKET_SIZE)) {
+        if(message.visit){
+            bool valid=packet && validPacket(packet,PACKET_SIZE,"VEH1");
+            bool active=navigation.selected==1 && vehicleVisit==message.visit;
+            if(valid){
+                bool different=!haveVehicle || memcmp(vehicleImage,packet+HEADER_SIZE,IMAGE_SIZE)!=0;
+                static uint32_t savedAt=0;
+                if(different && prefsReady && (!savedAt || millis()-savedAt>=3600000)){
+                    if(prefs.putBytes("vehicle",packet,PACKET_SIZE)==PACKET_SIZE)savedAt=millis();
+                }
+                memcpy(vehicleImage,packet+HEADER_SIZE,IMAGE_SIZE);
+                haveVehicle=true;
+                vehicleChanged=active && (vehicleFailed || memcmp(shown,vehicleImage,IMAGE_SIZE)!=0);
+                if(active)vehicleFailed=false;
+            } else if(active){
+                vehicleChanged=!vehicleFailed;
+                vehicleFailed=true;
+            }
+            if(active)Serial.println(valid ? "Vehicle visit updated" : "Vehicle visit offline");
+        } else if (packet && validPacket(packet,PACKET_SIZE)) {
             memcpy(baseImage,packet+HEADER_SIZE,IMAGE_SIZE);
             sourceAt=u32(packet+12);sourceFlags=u32(packet+16);
             setClock(u32(packet+8)+uint32_t((esp_timer_get_time()-message.receivedAt)/1000000));
@@ -274,7 +370,7 @@ void loop() {
     }
     static uint32_t lastMinute=UINT32_MAX;
     const uint32_t now=currentTime();
-    if (navigation.shouldRender(changed,now/60!=lastMinute,millis()-lastFull>=FULL_REFRESH_INTERVAL_MS,displayFailed)) {
+    if (vehicleChanged || navigation.shouldRender(changed,now/60!=lastMinute,millis()-lastFull>=FULL_REFRESH_INTERVAL_MS,displayFailed)) {
         render(now);lastMinute=now/60;
     }
     delay(20);

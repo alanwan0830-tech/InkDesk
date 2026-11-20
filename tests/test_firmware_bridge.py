@@ -73,9 +73,10 @@ def test_feed_is_authenticated_read_only_and_preserves_missing_data(tmp_path):
     token='t'*40
     server=ThreadingHTTPServer(('127.0.0.1',0),make_handler(token,path))
     thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
-    def request(route='/frame',auth=True,method='GET'):
+    def request(route='/frame',auth=True,method='GET',encoding='identity'):
         client=http.client.HTTPConnection(*server.server_address)
         headers={'Authorization':'Bearer '+token} if auth else {}
+        headers['Accept-Encoding']=encoding
         client.request(method,route,headers=headers)
         response=client.getresponse();status=response.status;body=response.read();client.close()
         return status,body
@@ -91,6 +92,11 @@ def test_feed_is_authenticated_read_only_and_preserves_missing_data(tmp_path):
         path.write_text(json.dumps({}))
         status,body=request()
         assert status==200 and len(body)==PACKET_SIZE
+        status,compressed=request(encoding='deflate')
+        assert status==200 and len(compressed)<PACKET_SIZE
+        decoded=zlib.decompress(compressed)
+        assert len(decoded)==PACKET_SIZE and decoded[:4]==b'PPR2'
+        assert decoded[24:]==body[24:]
         assert path.read_text()=='{}'
     finally:
         server.shutdown();server.server_close();thread.join()
