@@ -2,6 +2,15 @@
 #include <assert.h>
 using namespace paper;
 int main() {
+    const uint32_t boot=0xfffff000U;
+    HourlyVehicleRefresh hourly{boot};
+    assert(hourly.remaining(boot)==3600000U);
+    assert(!hourly.consume(boot+100)); // manual visit keeps original cadence
+    assert(hourly.remaining(boot+3599999U)==1);
+    assert(hourly.consume(boot+3600000U)); // millis wrapped
+    assert(!hourly.consume(boot+3600000U)); // coincident visit consumes one interval
+    assert(hourly.consume(boot+3*3600000U+17)); // delayed worker skips missed ticks
+    assert(hourly.remaining(boot+3*3600000U+17)==3600000U-17);
     Navigation nav;
     assert(nav.shouldRender(false,false,false,false));
     nav.commit();

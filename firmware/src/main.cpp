@@ -33,7 +33,7 @@ uint32_t sourceAt=0, lastFull=0, lastSaved=0, sourceFlags=0, lastDisplayTry=0;
 LocalClock localClock;
 bool haveImage=false, initialized=false, rtcReady=false, prefsReady=false;
 bool panelSynced=false, displayFailed=false;
-struct FrameMessage { uint8_t* packet; int64_t receivedAt; uint32_t visit; };
+struct FrameMessage { uint8_t* packet; int64_t receivedAt; uint32_t visit; bool vehicle; };
 // Sample independently so short presses during an e-paper refresh are retained.
 void buttonTask(void*) {
     const int pins[]={PREVIOUS_BUTTON,NEXT_BUTTON,HOME_BUTTON};
@@ -134,8 +134,26 @@ bool download(uint8_t* packet, bool vehicle) {
 }
 
 void fetchTask(void*) {
-    uint32_t homeDue=millis(), visit=0;
+    uint32_t homeDue=millis(), lastVisit=0;
+    HourlyVehicleRefresh hourly{homeDue};
     for (;;) {
+        bool vehicle=false;
+        // An overdue home request has a turn even during rapid manual navigation.
+        for (;;) {
+            uint32_t now=millis();
+            int32_t homeWait=int32_t(homeDue-now);
+            if (homeWait<=0) break;
+            uint32_t wait=min(uint32_t(homeWait),hourly.remaining(now));
+            uint32_t visit;
+            bool manual=xQueueReceive(vehicleRequests,&visit,pdMS_TO_TICKS(wait))==pdTRUE;
+            if (manual) lastVisit=visit;
+            bool scheduled=hourly.consume(millis());
+            if (scheduled || manual) {
+                vehicle=true;
+                Serial.println(scheduled ? "Vehicle hourly refresh" : "Vehicle manual refresh");
+                break;
+            }
+        }
         bool delivered=false;
         if (frameURL.length() && frameToken.length()>=32) {
             WiFi.mode(WIFI_STA);
@@ -154,8 +172,8 @@ void fetchTask(void*) {
                 }
                 uint8_t* packet=(uint8_t*)ps_malloc(PACKET_SIZE);
                 if (packet) {
-                    if (download(packet,visit!=0)) {
-                        FrameMessage message{packet,esp_timer_get_time(),visit};
+                    if (download(packet,vehicle)) {
+                        FrameMessage message{packet,esp_timer_get_time(),lastVisit,vehicle};
                         delivered=xQueueSend(inbox,&message,portMAX_DELAY)==pdTRUE;
                     }
                     if (!delivered) free(packet);
@@ -164,9 +182,9 @@ void fetchTask(void*) {
             WiFi.disconnect(false,false); // Never erase saved Wi-Fi settings.
             WiFi.mode(WIFI_OFF);
         }
-        if(visit){
+        if(vehicle){
             if(!delivered){
-                FrameMessage failure{nullptr,0,visit};
+                FrameMessage failure{nullptr,0,lastVisit,true};
                 xQueueSend(inbox,&failure,portMAX_DELAY);
             }
             Serial.println(delivered ? "Vehicle frame received" : "Vehicle request failed");
@@ -174,9 +192,6 @@ void fetchTask(void*) {
             Serial.println(delivered ? "First-screen data accepted" : "Keeping cached frame; local clock continues");
             homeDue=millis()+(delivered ? DATA_INTERVAL_MS : 60000);
         }
-        visit=0;
-        int32_t remaining=int32_t(homeDue-millis());
-        if(remaining>0)xQueueReceive(vehicleRequests,&visit,pdMS_TO_TICKS(remaining));
     }
 }
 
@@ -339,7 +354,7 @@ void loop() {
     if (xQueueReceive(inbox,&message,0)==pdTRUE) {
         uint8_t* packet=message.packet;
         // Validate again before touching the live frame or RTC.
-        if(message.visit){
+        if(message.vehicle){
             bool valid=packet && validPacket(packet,PACKET_SIZE,"VEH1");
             bool active=navigation.selected==1 && vehicleVisit==message.visit;
             if(valid){

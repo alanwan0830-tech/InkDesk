@@ -19,6 +19,21 @@ struct DebouncedPress {
     }
 };
 
+// Monotonic cadence from boot; manual visits between deadlines do not postpone it.
+struct HourlyVehicleRefresh {
+    static constexpr uint32_t interval=3600000U;
+    uint32_t last;
+    uint32_t remaining(uint32_t now) const {
+        uint32_t elapsed=now-last;
+        return elapsed>=interval ? 0 : interval-elapsed;
+    }
+    bool consume(uint32_t now) {
+        if (remaining(now)) return false;
+        last=now-(now-last)%interval;
+        return true;
+    }
+};
+
 struct Navigation {
     unsigned selected=0, displayed=PAGE_COUNT;
     void press(int direction) {
