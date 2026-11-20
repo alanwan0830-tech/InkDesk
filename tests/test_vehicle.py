@@ -145,3 +145,26 @@ def test_model_lookup_timeout_preserves_fresh_status(tmp_path, monkeypatch):
     assert ok and state['remainingRange']==318 and state['model']==''
     assert feed.parking_lock.acquire(timeout=2)
     feed.parking_lock.release()
+
+def test_transient_status_retry_and_persistent_failure(tmp_path, monkeypatch):
+    config = tmp_path/'cfg'
+    atomic_json(config, {'vehicle_id':1, 'base_url':'https://example.invalid', 'api_key':'test'})
+    feed = vehicle.VehicleFeed(config, tmp_path)
+    attempts = []
+    def api(cfg, route, body=None):
+        if body:
+            return {'content':'{}'}
+        if route == '/vehicles':
+            raise vehicle.requests.Timeout()
+        attempts.append(route)
+        if len(attempts) != 2:
+            raise vehicle.requests.ReadTimeout()
+        return {'vehicleId':1, 'remainingRange':318, 'batteryLevel':61,
+                'observedAt':'2025-04-12 16:40:00'}
+    monkeypatch.setattr(vehicle, 'request_data', api)
+    state, _, ok = feed.snapshot()
+    assert ok and state['remainingRange']==318 and len(attempts)==2
+    assert feed.parking_lock.acquire(timeout=2)
+    feed.parking_lock.release()
+    cached, _, ok = feed.snapshot()
+    assert not ok and cached==state and len(attempts)==4

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import re
 import threading
@@ -17,6 +18,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .common import ROOT, RUNTIME, atomic_json, read_json
 
+LOG = logging.getLogger(__name__)
 ART = ROOT / 'assets/vehicle-alpine.png'
 PARKING_QUERY = ('只读查询最近保存的停车记录，只返回 JSON 对象，字段 place 为场所名称，'
                  'area 为楼层和区域，time 为记录的 HH:mm。缺失用 null，禁止估算、'
@@ -31,6 +33,8 @@ def request_data(cfg, route, payload=None):
     response = requests.request('POST' if payload else 'GET', base+'/api/openapi/v1'+route,
                                 headers={'Authorization': 'Bearer '+cfg['api_key']}, json=payload,
                                 timeout=(3, 65 if payload else 6), allow_redirects=False)
+    if response.status_code in (502, 503, 504):
+        response.raise_for_status()
     if response.status_code != 200:
         raise ValueError('Vehicle service unavailable')
     result = response.json()
@@ -79,9 +83,17 @@ class VehicleFeed:
             parking_path = self.cache / ('parking-'+identity+'.json')
             state = read_json(state_path, {})
             parking = read_json(parking_path, {})
+            stage = 'config'
             try:
                 car = int(cfg['vehicle_id'])
-                data = request_data(cfg, f'/vehicles/status/{car}')
+                stage = 'status'
+                route = f'/vehicles/status/{car}'
+                try:
+                    data = request_data(cfg, route)
+                except (requests.Timeout, requests.ConnectionError, requests.HTTPError) as exc:
+                    LOG.warning('Vehicle status retry: %s', type(exc).__name__)
+                    data = request_data(cfg, route)
+                stage = 'fields'
                 if data.get('vehicleId') != car or not number(data.get('remainingRange')) or not number(data.get('batteryLevel')) or data['batteryLevel'] > 100:
                     raise ValueError('Invalid vehicle snapshot')
                 stamp = datetime.strptime(data['observedAt'], '%Y-%m-%d %H:%M:%S')
@@ -94,6 +106,7 @@ class VehicleFeed:
                         model = ''
                 state = {k: data.get(k) for k in ('vehicleName','remainingRange','batteryLevel','totalMileage','charging','sentryModeEnabled','parkingSpotNumber')}
                 state.update(model=model, observed=stamp.isoformat(' '))
+                stage = 'cache'
                 atomic_json(state_path, state)
                 now = time.time()
                 if now-parking.get('attempt', 0) >= 900 and self.parking_lock.acquire(False):
@@ -104,7 +117,8 @@ class VehicleFeed:
                         self.parking_lock.release()
                         raise
                 ok = True
-            except (OSError, ValueError, TypeError, AttributeError, KeyError, requests.RequestException):
+            except (OSError, ValueError, TypeError, AttributeError, KeyError, requests.RequestException) as exc:
+                LOG.warning('Vehicle snapshot failed: stage=%s error=%s', stage, type(exc).__name__)
                 ok = False
             return state, parking.get('record', {}), ok
 
